@@ -8,13 +8,13 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@200..1000&family=Amiri:wght@400;700&family=Reem+Kufi:wght@400..900&family=Scheherazade+New:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@200..1000&family=Amiri:wght@400;700&family=Amiri+Quran&family=Noto+Naskh+Arabic:wght@400;700&family=Reem+Kufi:wght@400..900&family=Scheherazade+New:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root { --emerald: #064e3b; --gold: #b38728; --gold-light: #f4d03f; --sand: #fcfbf7; --parchment: #fdf5e6; --tajweed-ghunnah: #ff7e00; --tajweed-madd: #2196f3; --tajweed-qalqalah: #4caf50; --tajweed-ikhfa: #9c27b0; }
         body { font-family: 'Cairo', sans-serif; background-color: #f4f1ea; color: #1e293b; margin: 0; overflow-x: hidden; }
         
         .quran-font { 
-            font-family: 'Scheherazade New', serif; 
+            font-family: var(--quran-font-family, 'Scheherazade New'), serif; 
             font-feature-settings: "ss01" on, "ss02" on, "cv01" on;
             text-rendering: optimizeLegibility;
         }
@@ -126,6 +126,15 @@
         .royal-gradient {
             background: linear-gradient(135deg, rgba(6, 78, 59, 0.95), rgba(6, 78, 59, 0.7));
         }
+
+        @media print {
+            .no-print { display: none !important; }
+            body { background: white !important; color: black !important; }
+            .mushaf-frame { border: none !important; box-shadow: none !important; padding: 0 !important; background: white !important; }
+            .surah-header-box { background: none !important; border-bottom: 2px solid #064e3b; height: auto !important; padding: 20px 0; }
+            .quran-font { color: black !important; }
+            @page { margin: 20mm; }
+        }
     </style>
     <script type="importmap">
     {
@@ -134,7 +143,11 @@
         "react-dom": "https://esm.sh/react-dom@19.0.0",
         "react-dom/client": "https://esm.sh/react-dom@19.0.0/client",
         "lucide-react": "https://esm.sh/lucide-react@0.460.0",
-        "htm": "https://esm.sh/htm@3.1.1"
+        "htm": "https://esm.sh/htm@3.1.1",
+        "fuse.js": "https://esm.sh/fuse.js@7.0.0",
+        "jspdf": "https://esm.sh/jspdf@2.5.1",
+        "html2canvas": "https://esm.sh/html2canvas@1.4.1",
+        "@google/genai": "https://esm.sh/@google/genai@0.2.1"
       }
     }
     </script>
@@ -148,6 +161,10 @@
         import { createRoot } from 'react-dom/client';
         import * as Lucide from 'lucide-react';
         import htm from 'htm';
+        import Fuse from 'fuse.js';
+        import { jsPDF } from 'jspdf';
+        import html2canvas from 'html2canvas';
+        import { GoogleGenAI } from "@google/genai";
 
         const html = htm.bind(React.createElement);
         const { 
@@ -157,7 +174,7 @@
             ShieldCheck, Sun, Info, Heart, Fingerprint, Settings2, X, Coffee,
             List, Layers, BookmarkCheck, History, ArrowRight, ArrowLeft, ArrowUp,
             Volume2, Languages, BookText, Share2, MoreHorizontal, Activity, Maximize2,
-            Home
+            Home, Plus
         } = Lucide;
 
         const SURAH_TYPES = {
@@ -165,8 +182,18 @@
             Medinan: { label: 'مدنية', icon: '🕌' }
         };
 
+        const TAFSIR_SOURCES = [
+            { id: 'ar.muyassar', name: 'التفسير الميسر' },
+            { id: 'ar.jalalayn', name: 'تفسير الجلالين' },
+            { id: 'ar.qurtubi', name: 'تفسير القرطبي' },
+            { id: 'ar.ibnkathir', name: 'تفسير ابن كثير' },
+            { id: 'ai', name: 'تفسير الذكاء الاصطناعي (Gemini)' }
+        ];
+
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
         const QuranSection = () => {
-            const [viewMode, setViewMode] = useState('surah-index'); // 'surah-index', 'juz-index', 'page-index', 'reading', 'bookmarks'
+            const [viewMode, setViewMode] = useState('surah-index'); // 'surah-index', 'juz-index', 'page-index', 'reading', 'bookmarks', 'interpretation'
             const [readingMode, setReadingMode] = useState('normal'); // 'normal', 'focus'
             const [surahs, setSurahs] = useState([]);
             const [selectedSurah, setSelectedSurah] = useState(null);
@@ -184,8 +211,19 @@
             const [showTafsir, setShowTafsir] = useState(false);
             const [showTranslation, setShowTranslation] = useState(false);
             const [tafsirContent, setTafsirContent] = useState(null);
+            const [selectedTafsirSource, setSelectedTafsirSource] = useState('ar.muyassar');
+            const [tafsirLoading, setTafsirLoading] = useState(false);
+            const [tafsirAyah, setTafsirAyah] = useState(null);
             const [translationContent, setTranslationContent] = useState([]);
-            const [mushafSettings, setMushafSettings] = useState(JSON.parse(localStorage.getItem('mushaf_settings') || '{"fontSize": 42, "lineSpacing": 2.2, "theme": "parchment"}'));
+            const [mushafSettings, setMushafSettings] = useState(() => {
+                const saved = JSON.parse(localStorage.getItem('mushaf_settings') || 'null');
+                return {
+                    fontSize: saved?.fontSize || 42,
+                    lineSpacing: saved?.lineSpacing || 2.2,
+                    theme: saved?.theme || 'parchment',
+                    fontFamily: saved?.fontFamily || 'Scheherazade New'
+                };
+            });
             const [bookmarks, setBookmarks] = useState(JSON.parse(localStorage.getItem('mushaf_bookmarks') || '[]'));
             const [searchQuery, setSearchQuery] = useState('');
             const [searchResult, setSearchResult] = useState([]);
@@ -195,13 +233,37 @@
             const [tasbihCount, setTasbihCount] = useState(parseInt(localStorage.getItem('mushaf_tasbih') || '0'));
             const [repeatCount, setRepeatCount] = useState(0);
             const [autoScroll, setAutoScroll] = useState(localStorage.getItem('mushaf_autoscroll') !== 'false');
+            const [namesOfAllah, setNamesOfAllah] = useState([]);
+            const [surahInterpretation, setSurahInterpretation] = useState(null);
+            const [selectedAyahDetails, setSelectedAyahDetails] = useState(null);
+            const [isGeneratingInterpretation, setIsGeneratingInterpretation] = useState(false);
             const audioRef = useRef(null);
             const ayahRefs = useRef({});
             const autoPlayRef = useRef(false);
 
+            const fuse = useMemo(() => {
+                if (surahs.length === 0) return null;
+                return new Fuse(surahs, {
+                    keys: ['name', 'englishName', 'number'],
+                    threshold: 0.4,
+                    includeScore: true
+                });
+            }, [surahs]);
+
             useEffect(() => {
+                const theme = themes[mushafSettings.theme];
+                document.body.style.backgroundColor = theme.bg;
+                document.body.style.color = theme.text;
+                document.documentElement.style.setProperty('--quran-font-family', `"${mushafSettings.fontFamily}"`);
                 localStorage.setItem('mushaf_settings', JSON.stringify(mushafSettings));
             }, [mushafSettings]);
+
+            const toggleDarkMode = () => {
+                setMushafSettings(s => ({
+                    ...s,
+                    theme: s.theme === 'dark' ? 'parchment' : 'dark'
+                }));
+            };
 
             useEffect(() => {
                 localStorage.setItem('mushaf_speed', audioSpeed.toString());
@@ -232,6 +294,13 @@
                     .then(r => r.json())
                     .then(d => setPrayerTimes(d.data.timings));
             }, [location]);
+
+            useEffect(() => {
+                fetch('https://api.aladhan.com/v1/asmaAlHusna')
+                    .then(r => r.json())
+                    .then(d => setNamesOfAllah(d.data || []))
+                    .catch(e => console.error("Error fetching names of Allah:", e));
+            }, []);
 
             const reciters = [
                 { id: 'ar.alafasy', name: 'مشاري العفاسي', folder: 'Alafasy_128kbps' }
@@ -293,11 +362,79 @@
                 }
             };
 
-            const openSurah = async (n, autoPlay = false) => {
+            const generateSurahInterpretation = async (surahNumber) => {
+                if (!surahNumber) return;
+                setIsGeneratingInterpretation(true);
+                try {
+                    const surah = surahs.find(s => s.number === surahNumber);
+                    const prompt = `قدم تفسيراً ميسراً ومختصراً لسورة ${surah?.name} (رقم ${surahNumber}) بأسلوب عصري وسلس، يشمل مقاصد السورة وأبرز الدروس المستفادة منها.`;
+                    const response = await ai.models.generateContent({
+                        model: "gemini-3-flash-preview",
+                        contents: prompt,
+                    });
+                    setSurahInterpretation(response.text);
+                } catch (error) {
+                    console.error("Error generating interpretation:", error);
+                    setSurahInterpretation("عذراً، حدث خطأ أثناء توليد التفسير. يرجى المحاولة مرة أخرى.");
+                }
+                setIsGeneratingInterpretation(false);
+            };
+
+            const fetchAyahDetails = async (ayah) => {
+                setSelectedAyahDetails({ loading: true, ...ayah });
+                try {
+                    const prompt = `قدم معلومات تفصيلية عن الآية رقم ${ayah.numberInSurah} من سورة ${ayah.surah?.name || selectedSurah} تشمل:
+                    1. سبب النزول (إن وجد).
+                    2. قصص قرآنية مرتبطة بالآية.
+                    3. أحاديث نبوية شريفة تفسر أو ترتبط بالآية.
+                    اجعل الإجابة منظمة في نقاط واضحة.`;
+                    
+                    const response = await ai.models.generateContent({
+                        model: "gemini-3-flash-preview",
+                        contents: prompt,
+                    });
+                    setSelectedAyahDetails(prev => ({ ...prev, details: response.text, loading: false }));
+                } catch (error) {
+                    console.error("Error fetching ayah details:", error);
+                    setSelectedAyahDetails(prev => ({ ...prev, details: "عذراً، تعذر جلب تفاصيل الآية حالياً.", loading: false }));
+                }
+            };
+
+            const handleSearch = (query) => {
+                setSearchQuery(query);
+                if (!query.trim()) {
+                    setSearchResult([]);
+                    return;
+                }
+
+                // Check if it's a page number
+                const pageNum = parseInt(query);
+                if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= 604) {
+                    setSearchResult([{ 
+                        type: 'page',
+                        page: pageNum, 
+                        text: `انتقال سريع للصفحة رقم ${pageNum}`, 
+                        surah: { name: 'انتقال سريع' } 
+                    }]);
+                    return;
+                }
+
+                if (fuse) {
+                    const results = fuse.search(query);
+                    setSearchResult(results.map(r => ({ ...r.item, type: 'surah' })));
+                }
+            };
+
+            const openSurah = async (n, autoPlay = false, mode = 'reading') => {
                 setLoading(true);
                 setSelectedSurah(n);
-                setViewMode('reading');
+                setViewMode(mode);
                 autoPlayRef.current = autoPlay;
+                
+                if (mode === 'interpretation') {
+                    generateSurahInterpretation(n);
+                }
+
                 if (audioRef.current) {
                     audioRef.current.pause();
                     audioRef.current.src = "";
@@ -324,6 +461,10 @@
                 }
                 setLoading(false);
                 window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+
+            const exportSurahToPDF = () => {
+                window.print();
             };
 
             const openJuz = async (n) => {
@@ -516,14 +657,30 @@
                 }
             };
 
-            const fetchTafsir = async (ayahNumber) => {
+            const fetchTafsir = async (ayah, source = selectedTafsirSource) => {
+                setTafsirAyah(ayah);
+                setSelectedTafsirSource(source);
+                setTafsirLoading(true);
+                setShowTafsir(true);
                 try {
-                    const res = await fetch(`https://api.alquran.cloud/v1/ayah/${ayahNumber}/ar.jalalayn`);
-                    const data = await res.json();
-                    setTafsirContent(data.data);
-                    setShowTafsir(true);
+                    if (source === 'ai') {
+                        const prompt = `قدم تفسيراً ميسراً وشاملاً للآية رقم ${ayah.numberInSurah} من سورة ${ayah.surah?.name || surahs.find(s => s.number === selectedSurah)?.name} والتي نصها: "${ayah.text}".
+                        اشرح المعاني والكلمات الصعبة، وما يستفاد من الآية.`;
+                        const response = await ai.models.generateContent({
+                            model: "gemini-3-flash-preview",
+                            contents: prompt,
+                        });
+                        setTafsirContent({ text: response.text, sourceName: 'تفسير الذكاء الاصطناعي (Gemini)' });
+                    } else {
+                        const res = await fetch(`https://api.alquran.cloud/v1/ayah/${ayah.number}/${source}`);
+                        const data = await res.json();
+                        setTafsirContent({ text: data.data.text, sourceName: data.data.edition.name });
+                    }
                 } catch (error) {
                     console.error("Error fetching tafsir:", error);
+                    setTafsirContent({ text: "عذراً، تعذر جلب التفسير حالياً.", sourceName: 'خطأ' });
+                } finally {
+                    setTafsirLoading(false);
                 }
             };
 
@@ -533,7 +690,7 @@
                 try {
                     const res = await fetch(`https://api.alquran.cloud/v1/search/${query}/all/ar`);
                     const data = await res.json();
-                    setSearchResult(data.data.matches || []);
+                    setSearchResult((data.data.matches || []).map(m => ({ ...m, type: 'ayah' })));
                 } catch (error) {
                     console.error("Search error:", error);
                 }
@@ -560,8 +717,7 @@
 
             return html`
                 <div className="min-h-screen pb-32">
-                    <!-- Top Navigation Bar -->
-                    <div className=${`sticky top-0 z-50 bg-white/90 backdrop-blur-2xl border-b border-emerald-100 px-6 py-4 flex items-center justify-between shadow-md transition-all duration-500 ${readingMode === 'focus' && viewMode === 'reading' ? '-translate-y-full opacity-0' : 'translate-y-0 opacity-100'}`}>
+                    <div className=${`sticky top-0 z-50 bg-white/90 backdrop-blur-2xl border-b border-emerald-100 px-6 py-4 flex items-center justify-between shadow-md transition-all duration-500 no-print ${readingMode === 'focus' && viewMode === 'reading' ? '-translate-y-full opacity-0' : 'translate-y-0 opacity-100'}`}>
                         <div className="flex items-center gap-4">
                             <div className="w-12 h-12 bg-emerald-900 rounded-2xl flex items-center justify-center border-2 border-[#d4af37] shadow-lg">
                                 <span className="text-white text-2xl font-black state-font">م</span>
@@ -573,6 +729,9 @@
                         </div>
                         
                         <div className="flex items-center gap-1">
+                            <button onClick=${toggleDarkMode} className="p-3 rounded-xl text-slate-400 hover:bg-emerald-50 transition-all" title="الوضع الليلي">
+                                <${mushafSettings.theme === 'dark' ? Sun : Moon} size=${20} />
+                            </button>
                             <button onClick=${() => setViewMode('surah-index')} className=${`p-3 rounded-xl transition-all ${viewMode === 'surah-index' ? 'bg-emerald-900 text-white shadow-lg' : 'text-slate-400 hover:bg-emerald-50'}`} title="الرئيسية">
                                 <${Home} size=${20} />
                             </button>
@@ -595,10 +754,9 @@
                     </div>
 
                     <main className="max-w-5xl mx-auto p-4 sm:p-6">
-                        <!-- Back to Top Button -->
                         <button 
                             onClick=${() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-                            className="fixed bottom-28 left-6 z-[60] p-4 bg-white/80 backdrop-blur-xl text-emerald-900 rounded-2xl shadow-xl border border-emerald-100 hover:bg-emerald-900 hover:text-white transition-all"
+                            className="fixed bottom-28 left-6 z-[60] p-4 bg-white/80 backdrop-blur-xl text-emerald-900 rounded-2xl shadow-xl border border-emerald-100 hover:bg-emerald-900 hover:text-white transition-all no-print"
                         >
                             <${ArrowUp} size=${24} />
                         </button>
@@ -609,24 +767,13 @@
                                         type="text" 
                                         placeholder="ابحث عن سورة، آية، أو رقم صفحة..." 
                                         value=${searchQuery}
-                                        onChange=${e => {
-                                            const val = e.target.value;
-                                            setSearchQuery(val);
-                                            if (/^\d+$/.test(val)) {
-                                                const p = parseInt(val);
-                                                if (p >= 1 && p <= 604) {
-                                                    // Add a special result for page number
-                                                    setSearchResult([{ page: p, text: `انتقال إلى الصفحة رقم ${p}`, surah: { name: 'انتقال سريع' } }]);
-                                                }
-                                            }
-                                        }}
+                                        onChange=${e => handleSearch(e.target.value)}
                                         className="w-full px-14 py-5 bg-white rounded-[2rem] border-2 border-emerald-50 focus:border-[#d4af37] outline-none font-bold text-lg shadow-sm"
                                     />
                                     <${Search} className="absolute right-6 top-1/2 -translate-y-1/2 text-slate-300" size=${24} />
                                 </div>
 
                                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                                    <!-- Last Read Card -->
                                     ${lastRead && html`
                                         <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border-2 border-emerald-50 col-span-full mb-4 relative overflow-hidden group">
                                             <div className="absolute top-0 left-0 w-full h-1 bg-[#d4af37]"></div>
@@ -646,7 +793,6 @@
                                         </div>
                                     `}
 
-                                    <!-- Prayer Times Widget -->
                                     ${prayerTimes && html`
                                         <div className="bg-emerald-900 p-8 rounded-[3rem] text-white shadow-2xl border-4 border-[#d4af37] col-span-full mb-8 flex flex-wrap justify-between items-center gap-6 relative overflow-hidden group">
                                             <div className="absolute top-0 right-0 w-64 h-64 bg-white/5 rounded-full -mr-32 -mt-32 transition-transform group-hover:scale-110"></div>
@@ -711,8 +857,8 @@
                                     <p className="text-slate-400 font-bold">تصفح القرآن حسب الأجزاء</p>
                                 </div>
                                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-                                    ${juzs.map(j => html`
-                                        <button key=${j} onClick=${() => openJuz(j)} className="bg-white p-8 rounded-[2.5rem] text-center shadow-sm border-2 border-emerald-50 hover:border-[#d4af37] hover:shadow-xl transition-all group">
+                                    ${juzs.map((j, i) => html`
+                                        <button key=${`juz-${j}-${i}`} onClick=${() => openJuz(j)} className="bg-white p-8 rounded-[2.5rem] text-center shadow-sm border-2 border-emerald-50 hover:border-[#d4af37] hover:shadow-xl transition-all group">
                                             <span className="block text-xs font-bold text-slate-400 mb-2">الجزء</span>
                                             <span className="text-4xl font-black text-emerald-900 state-font">${j}</span>
                                         </button>
@@ -728,8 +874,8 @@
                                     <p className="text-slate-400 font-bold">تصفح القرآن حسب الصفحة (604 صفحة)</p>
                                 </div>
                                 <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-8 gap-3">
-                                    ${pages.map(p => html`
-                                        <button key=${p} onClick=${() => fetchPage(p)} className="bg-white p-4 rounded-2xl text-center shadow-sm border border-emerald-50 hover:border-[#d4af37] hover:bg-emerald-50 transition-all">
+                                    ${pages.map((p, i) => html`
+                                        <button key=${`page-btn-${p}-${i}`} onClick=${() => fetchPage(p)} className="bg-white p-4 rounded-2xl text-center shadow-sm border border-emerald-50 hover:border-[#d4af37] hover:bg-emerald-50 transition-all">
                                             <span className="text-xl font-black text-emerald-900">${p}</span>
                                         </button>
                                     `)}
@@ -759,8 +905,8 @@
                                     </div>
                                 ` : html`
                                     <div className="grid grid-cols-1 gap-4">
-                                        ${bookmarks.map(b => html`
-                                            <div key=${b.page} className="bg-white p-6 rounded-[2rem] shadow-sm flex items-center justify-between border-2 border-emerald-50">
+                                        ${bookmarks.map((b, i) => html`
+                                            <div key=${`bookmark-${b.page}-${i}`} className="bg-white p-6 rounded-[2rem] shadow-sm flex items-center justify-between border-2 border-emerald-50">
                                                 <div className="flex items-center gap-6">
                                                     <div className="w-12 h-12 bg-emerald-900 text-white rounded-xl flex items-center justify-center font-black">
                                                         ${b.page}
@@ -808,7 +954,7 @@
                                             if (/^\d+$/.test(val)) {
                                                 const p = parseInt(val);
                                                 if (p >= 1 && p <= 604) {
-                                                    setSearchResult([{ page: p, text: `انتقال سريع للصفحة رقم ${p}`, surah: { name: 'انتقال سريع' } }]);
+                                                    setSearchResult([{ type: 'page', page: p, text: `انتقال سريع للصفحة رقم ${p}`, surah: { name: 'انتقال سريع' } }]);
                                                 }
                                             }
                                         }}
@@ -819,13 +965,13 @@
                                 </div>
 
                                 <div className="space-y-4">
-                                    ${loading ? html`<div className="text-center py-10"><${Loader2} className="animate-spin mx-auto text-emerald-900" size=${40} /></div>` : searchResult.map(m => html`
-                                        <button key=${m.number || m.page} onClick=${() => m.page ? fetchPage(m.page) : openSurah(m.surah.number)} className="w-full bg-white p-6 rounded-[2rem] text-right shadow-sm border-2 border-emerald-50 hover:border-[#d4af37] transition-all">
+                                    ${loading ? html`<div className="text-center py-10"><${Loader2} className="animate-spin mx-auto text-emerald-900" size=${40} /></div>` : searchResult.map((m, i) => html`
+                                        <button key=${`${m.type || 'result'}-${m.number || m.page || i}-${i}`} onClick=${() => m.page ? fetchPage(m.page) : openSurah(m.surah?.number || m.number)} className="w-full bg-white p-6 rounded-[2rem] text-right shadow-sm border-2 border-emerald-50 hover:border-[#d4af37] transition-all">
                                             <div className="flex justify-between items-center mb-3">
-                                                <span className="bg-emerald-50 text-emerald-900 px-3 py-1 rounded-lg font-black text-xs">${m.surah.name} ${m.numberInSurah ? `- آية ${m.numberInSurah}` : ''}</span>
+                                                <span className="bg-emerald-50 text-emerald-900 px-3 py-1 rounded-lg font-black text-xs">${m.surah?.name || m.name || 'نتيجة'} ${m.numberInSurah ? `- آية ${m.numberInSurah}` : ''}</span>
                                                 ${m.page && html`<span className="text-xs text-slate-400">صفحة ${m.page}</span>`}
                                             </div>
-                                            <p className="text-xl font-black text-emerald-950 quran-font leading-relaxed">${m.text}</p>
+                                            <p className="text-xl font-black text-emerald-950 quran-font leading-relaxed">${m.text || ''}</p>
                                         </button>
                                     `)}
                                     ${!loading && searchQuery && searchResult.length === 0 && html`<p className="text-center text-slate-400 font-bold">لا توجد نتائج لهذا البحث</p>`}
@@ -833,10 +979,10 @@
                             </div>
                         `}
 
+
                         ${viewMode === 'reading' && html`
                             <div className="relative animate-in fade-in duration-700">
-                                <!-- Reading Controls Overlay -->
-                                <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-2 sm:gap-4 bg-emerald-950/95 backdrop-blur-3xl px-4 sm:px-8 py-4 rounded-[3rem] shadow-2xl border border-white/10">
+                                <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-2 sm:gap-4 bg-emerald-950/95 backdrop-blur-3xl px-4 sm:px-8 py-4 rounded-[3rem] shadow-2xl border border-white/10 no-print">
                                     <button onClick=${() => fetchPage(Math.max(1, currentPage - 1))} className="p-3 text-white hover:bg-white/10 rounded-full transition-all" title="الصفحة السابقة">
                                         <${ArrowRight} size=${24} />
                                     </button>
@@ -858,11 +1004,13 @@
                                     <button onClick=${() => setReadingMode(readingMode === 'normal' ? 'focus' : 'normal')} className=${`p-3 transition-all rounded-full ${readingMode === 'focus' ? 'text-[#d4af37]' : 'text-white hover:bg-white/10'}`} title="وضع التركيز">
                                         <${Maximize2} size=${24} />
                                     </button>
-                                    
-                                    <div className="w-px h-8 bg-white/10 mx-1"></div>
-                                    
+
                                     <button onClick=${toggleTranslation} className=${`p-3 transition-all rounded-full ${showTranslation ? 'text-[#d4af37]' : 'text-white hover:bg-white/10'}`} title="الترجمة">
                                         <${Languages} size=${24} />
+                                    </button>
+
+                                    <button onClick=${exportSurahToPDF} disabled=${loading} className="p-3 text-white hover:bg-white/10 rounded-full transition-all disabled:opacity-50" title="طباعة / حفظ كـ PDF">
+                                        <${loading ? Loader2 : BookText} size=${24} className=${loading ? 'animate-spin' : ''} />
                                     </button>
 
                                     <button onClick=${() => setShowSettings(true)} className="p-3 text-white hover:bg-white/10 rounded-full transition-all" title="الإعدادات">
@@ -881,7 +1029,7 @@
                                 </div>
 
                                 ${showSettings && html`
-                                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/70 backdrop-blur-md">
+                                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/70 backdrop-blur-md no-print">
                                         <div className="bg-white w-full max-w-md rounded-[3rem] p-10 shadow-2xl space-y-8 border-4 border-emerald-50">
                                             <div className="flex justify-between items-center">
                                                 <h4 className="text-2xl font-black state-font text-emerald-900">إعدادات المصحف</h4>
@@ -908,6 +1056,21 @@
                                                         <span className="bg-emerald-50 px-3 py-1 rounded-lg text-emerald-900 font-black">${mushafSettings.lineSpacing}</span>
                                                     </div>
                                                     <input type="range" min="1.5" max="4.0" step="0.1" value=${mushafSettings.lineSpacing} onChange=${e => setMushafSettings(s => ({...s, lineSpacing: parseFloat(e.target.value)}))} className="w-full h-2 bg-emerald-50 rounded-lg appearance-none cursor-pointer" />
+                                                </div>
+                                                <div>
+                                                    <label className="font-bold text-slate-600 block mb-4">نوع الخط</label>
+                                                    <div className="flex flex-wrap gap-2">
+                                                        ${['Scheherazade New', 'Amiri', 'Amiri Quran', 'Noto Naskh Arabic', 'Cairo', 'Reem Kufi'].map(font => html`
+                                                            <button 
+                                                                key=${font}
+                                                                onClick=${() => setMushafSettings(s => ({...s, fontFamily: font}))}
+                                                                className=${`px-4 py-2 rounded-xl text-sm font-black transition-all ${mushafSettings.fontFamily === font ? 'bg-emerald-900 text-white' : 'bg-emerald-50 text-emerald-900'}`}
+                                                                style=${{ fontFamily: `"${font}", serif` }}
+                                                            >
+                                                                ${font === 'Scheherazade New' ? 'شهرزاد' : font === 'Amiri' ? 'أميري' : font === 'Amiri Quran' ? 'أميري قرآن' : font === 'Noto Naskh Arabic' ? 'نسخ' : font === 'Cairo' ? 'كايرو' : 'ريم كوفي'}
+                                                            </button>
+                                                        `)}
+                                                    </div>
                                                 </div>
                                                 <div>
                                                     <div className="flex justify-between mb-4">
@@ -977,29 +1140,55 @@
                                     </div>
                                 `}
 
-                                ${showTafsir && tafsirContent && html`
-                                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/70 backdrop-blur-md">
+                                ${showTafsir && html`
+                                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/70 backdrop-blur-md no-print">
                                         <div className="bg-white w-full max-w-2xl rounded-[3rem] p-10 shadow-2xl space-y-6 border-4 border-emerald-50 overflow-y-auto max-h-[80vh]">
                                             <div className="flex justify-between items-center border-b pb-4">
-                                                <h4 className="text-2xl font-black state-font text-emerald-900">تفسير الجلالين</h4>
+                                                <h4 className="text-2xl font-black state-font text-emerald-900">تفسير الآية</h4>
                                                 <button onClick=${() => setShowTafsir(false)} className="p-2 hover:bg-rose-50 text-rose-500 rounded-full"><${X} /></button>
                                             </div>
+                                            
+                                            <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
+                                                ${TAFSIR_SOURCES.map(source => html`
+                                                    <button 
+                                                        key=${source.id}
+                                                        onClick=${() => fetchTafsir(tafsirAyah, source.id)}
+                                                        className=${`px-4 py-2 rounded-xl text-sm font-bold whitespace-nowrap transition-all ${selectedTafsirSource === source.id ? 'bg-emerald-900 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-emerald-100'}`}
+                                                    >
+                                                        ${source.name}
+                                                    </button>
+                                                `)}
+                                            </div>
+
                                             <div className="space-y-4">
-                                                <p className="text-2xl font-black text-emerald-950 quran-font leading-relaxed bg-emerald-50 p-6 rounded-3xl">${tafsirContent.text}</p>
-                                                <div className="p-6 bg-slate-50 rounded-3xl">
-                                                    <h5 className="font-black text-emerald-900 mb-2">التفسير:</h5>
-                                                    <p className="text-lg font-bold text-slate-700 leading-relaxed">${tafsirContent.text}</p>
-                                                    <p className="text-sm text-slate-400 mt-4 italic">ملاحظة: هذا التفسير مأخوذ من قاعدة بيانات الجلالين.</p>
+                                                ${tafsirAyah && html`
+                                                    <p className="text-2xl font-black text-emerald-950 quran-font leading-relaxed bg-emerald-50 p-6 rounded-3xl text-center">
+                                                        ${tafsirAyah.text.replace(/^بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ/, '')} ﴿${tafsirAyah.numberInSurah}﴾
+                                                    </p>
+                                                `}
+                                                
+                                                <div className="p-6 bg-slate-50 rounded-3xl min-h-[150px] relative">
+                                                    ${tafsirLoading ? html`
+                                                        <div className="absolute inset-0 flex items-center justify-center bg-slate-50/80 rounded-3xl z-10">
+                                                            <${Loader2} className="animate-spin text-emerald-900" size=${32} />
+                                                        </div>
+                                                    ` : null}
+                                                    
+                                                    ${tafsirContent && html`
+                                                        <h5 className="font-black text-emerald-900 mb-2">${tafsirContent.sourceName}:</h5>
+                                                        <div className="text-lg font-bold text-slate-700 leading-relaxed whitespace-pre-wrap"
+                                                             dangerouslySetInnerHTML=${{ __html: tafsirContent.text.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\*(.*?)\*/g, '<i>$1</i>') }}>
+                                                        </div>
+                                                    `}
                                                 </div>
                                             </div>
                                         </div>
                                     </div>
                                 `}
 
-                                <div className=${`mushaf-frame rounded-[3rem] shadow-2xl relative overflow-hidden transition-all duration-500 ${readingMode === 'focus' ? 'scale-105' : ''}`} style=${{backgroundColor: themes[mushafSettings.theme].bg}}>
+                                <div id="mushaf-content" className=${`mushaf-frame rounded-[3rem] shadow-2xl relative overflow-hidden transition-all duration-500 ${readingMode === 'focus' ? 'scale-105' : ''}`} style=${{backgroundColor: themes[mushafSettings.theme].bg}}>
                                     <div className="mushaf-border-ornate"></div>
                                     <div className="p-6 md:p-16 relative z-20">
-                                        <!-- Mushaf Header -->
                                         <div className="flex justify-between items-center mb-12 border-b-4 border-double border-emerald-100 pb-8">
                                             <div className="text-sm font-black text-emerald-900 bg-emerald-50 px-4 py-2 rounded-xl">الجزء ${ayahs[0]?.juz || surahs.find(s => s.number === selectedSurah)?.juz || '...'}</div>
                                             <div className="flex flex-col items-center">
@@ -1015,52 +1204,60 @@
                                             <div className="text-sm font-black text-emerald-900 bg-emerald-50 px-4 py-2 rounded-xl">صفحة ${currentPage}</div>
                                         </div>
 
-                                        ${(currentPage === 1 || ayahs[0]?.numberInSurah === 1) && html`
-                                            <div className="surah-header-box">
-                                                <h2 className="text-4xl font-black state-font text-emerald-950">${ayahs[0]?.surah?.name || surahs.find(s => s.number === selectedSurah)?.name}</h2>
-                                            </div>
-                                        `}
-
                                         <div className="quran-font text-center tracking-wide" style=${{ fontSize: `${mushafSettings.fontSize}px`, lineHeight: mushafSettings.lineSpacing, color: themes[mushafSettings.theme].text }}>
-                                            ${(currentPage === 1 || ayahs[0]?.numberInSurah === 1) && html`<div className="mb-16 text-emerald-900 text-5xl font-normal opacity-90">بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ</div>`}
-                                            
                                             ${loading ? html`
                                                 <div className="py-48 flex flex-col items-center">
                                                     <${Loader2} className="animate-spin text-emerald-900 mb-8" size=${80} /> 
                                                     <p className="font-black text-2xl text-emerald-900 state-font">جاري فتح الصفحة الشريفة...</p>
                                                 </div>
-                                            ` : ayahs.map((a, idx) => html`
-                                                <span 
-                                                    key=${a.number} 
-                                                    ref=${el => ayahRefs.current[idx] = el}
-                                                    className=${`inline group transition-all cursor-pointer rounded-2xl px-2 ${currentAyahIndex === idx ? 'bg-emerald-500/20 ring-4 ring-emerald-500/30' : 'hover:bg-emerald-500/10'}`}
-                                                >
-                                                    <span onClick=${() => { if(playing && currentAyahIndex === idx) { setPlaying(false); audioRef.current?.pause(); } else { playAyah(idx); } }} dangerouslySetInnerHTML=${{ __html: parseTajweed(a.text.replace('بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ', '')) + `
-                                                        <span class="ayah-container">
-                                                            <span class="ayah-symbol-outer">﴿</span>
-                                                            <span class="ayah-num-frame">${a.numberInSurah}</span>
-                                                            <span class="ayah-symbol-outer">﴾</span>
-                                                        </span>
-                                                    ` }}>
-                                                    </span>
-                                                    <div className="hidden group-hover:inline-flex ml-2 items-center gap-1">
-                                                        <button onClick=${(e) => { e.stopPropagation(); fetchTafsir(a.number); }} className="p-1 bg-emerald-900 text-white rounded-lg text-[10px] flex items-center gap-1">
-                                                            <${BookText} size=${10} /> تفسير
-                                                        </button>
-                                                        <button onClick=${(e) => { e.stopPropagation(); copyAyah(a.text); }} className="p-1 bg-slate-200 text-slate-700 rounded-lg text-[10px] flex items-center gap-1">
-                                                            <${Share2} size=${10} /> نسخ
-                                                        </button>
-                                                    </div>
-                                                    ${showTranslation && translationContent[idx] && html`
-                                                        <div className="block text-sm font-sans text-slate-400 mt-2 mb-4 text-right dir-ltr opacity-80 leading-relaxed">
-                                                            ${translationContent[idx].text}
+                                            ` : ayahs.map((a, idx) => {
+                                                const elements = [];
+                                                if (a.numberInSurah === 1) {
+                                                    elements.push(html`
+                                                        <div key=${`header-${a.number}-${idx}`} className="w-full">
+                                                            <div className="surah-header-box mt-12 mb-8">
+                                                                <h2 className="text-4xl font-black state-font text-emerald-950">${a.surah?.name || surahs.find(s => s.number === selectedSurah)?.name}</h2>
+                                                            </div>
+                                                            ${a.surah?.number !== 9 && html`<div className="mb-16 text-emerald-900 text-5xl font-normal opacity-90">بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ</div>`}
                                                         </div>
-                                                    `}
-                                                </span>
-                                            `)}
+                                                    `);
+                                                }
+                                                elements.push(html`
+                                                    <span 
+                                                        key=${`ayah-${a.number}-${idx}`}
+                                                        ref=${el => ayahRefs.current[idx] = el}
+                                                        className=${`inline group transition-all cursor-pointer rounded-2xl px-2 ${currentAyahIndex === idx ? 'bg-emerald-500/20 ring-4 ring-emerald-500/30' : 'hover:bg-emerald-500/10'}`}
+                                                    >
+                                                        <span onClick=${() => { if(playing && currentAyahIndex === idx) { setPlaying(false); audioRef.current?.pause(); } else { playAyah(idx); } }} dangerouslySetInnerHTML=${{ __html: parseTajweed(a.text.replace(/^بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ/, '')) + `
+                                                            <span class="ayah-container">
+                                                                <span class="ayah-symbol-outer">﴿</span>
+                                                                <span class="ayah-num-frame">${a.numberInSurah}</span>
+                                                                <span class="ayah-symbol-outer">﴾</span>
+                                                            </span>
+                                                        ` }}>
+                                                        </span>
+                                                        <div className="hidden group-hover:inline-flex ml-2 items-center gap-1">
+                                                            <button onClick=${(e) => { e.stopPropagation(); fetchAyahDetails(a); }} className="p-1 bg-[#d4af37] text-white rounded-lg text-[10px] flex items-center gap-1" title="تفاصيل وتدبر">
+                                                                <${Plus} size=${10} /> تدبر
+                                                            </button>
+                                                            <button onClick=${(e) => { e.stopPropagation(); fetchTafsir(a); }} className="p-1 bg-emerald-900 text-white rounded-lg text-[10px] flex items-center gap-1">
+                                                                <${BookText} size=${10} /> تفسير
+                                                            </button>
+                                                            <button onClick=${(e) => { e.stopPropagation(); copyAyah(a.text); }} className="p-1 bg-slate-200 text-slate-700 rounded-lg text-[10px] flex items-center gap-1">
+                                                                <${Share2} size=${10} /> نسخ
+                                                            </button>
+                                                        </div>
+                                                        ${showTranslation && translationContent[idx] && html`
+                                                            <div className="block text-sm font-sans text-slate-400 mt-2 mb-4 text-right dir-ltr opacity-80 leading-relaxed">
+                                                                ${translationContent[idx].text}
+                                                            </div>
+                                                        `}
+                                                    </span>
+                                                `);
+                                                return elements;
+                                            })}
                                         </div>
 
-                                        <!-- Mushaf Footer -->
                                         <div className="mt-12 pt-6 border-t border-emerald-100 flex justify-center items-center gap-10 opacity-40">
                                             <div className="text-xs font-bold">الحزب ${Math.ceil(ayahs[0]?.juz * 2)}</div>
                                             <div className="w-2 h-2 bg-emerald-900 rounded-full"></div>
@@ -1084,7 +1281,6 @@
                                 </div>
                                 
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <!-- Tasbih -->
                                     <div className="bg-white p-10 rounded-[3rem] shadow-sm border-2 border-emerald-50 text-center space-y-6">
                                         <h3 className="text-2xl font-black state-font text-emerald-900">المسبحة الإلكترونية</h3>
                                         <div className="relative inline-block">
@@ -1096,7 +1292,6 @@
                                         <button onClick=${() => setTasbihCount(tasbihCount + 1)} className="w-full py-6 bg-emerald-900 text-white rounded-3xl font-black text-2xl shadow-xl hover:scale-105 transition-all active:scale-95">تسبيح</button>
                                     </div>
 
-                                    <!-- Names of Allah -->
                                     <div className="bg-white p-10 rounded-[3rem] shadow-sm border-2 border-emerald-50 space-y-6 overflow-hidden flex flex-col">
                                         <h3 className="text-2xl font-black state-font text-emerald-900 text-center">أسماء الله الحسنى</h3>
                                         <div className="grid grid-cols-3 gap-2 overflow-y-auto no-scrollbar max-h-[300px] p-2">
@@ -1106,6 +1301,61 @@
                                                     <span className="block text-[10px] text-emerald-600 group-hover:text-emerald-200 opacity-0 group-hover:opacity-100 transition-opacity">${n.transliteration}</span>
                                                 </div>
                                             `)}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `}
+                        ${selectedAyahDetails && html`
+                            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-emerald-950/40 backdrop-blur-md animate-in fade-in duration-300 no-print">
+                                <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl border-4 border-[#d4af37] overflow-hidden flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-300">
+                                    <div className="p-8 bg-emerald-900 text-white flex justify-between items-center">
+                                        <div>
+                                            <h3 className="text-2xl font-black state-font">تفاصيل الآية</h3>
+                                            <p className="text-sm opacity-70 font-bold">سورة ${selectedAyahDetails.surah?.name || '...'} - آية ${selectedAyahDetails.numberInSurah}</p>
+                                        </div>
+                                        <button onClick=${() => setSelectedAyahDetails(null)} className="p-3 bg-white/10 rounded-2xl hover:bg-white/20 transition-all">
+                                            <${X} size=${24} />
+                                        </button>
+                                    </div>
+                                    
+                                    <div className="p-8 overflow-y-auto no-scrollbar space-y-8">
+                                        <div className="p-6 bg-emerald-50 rounded-[2rem] border border-emerald-100">
+                                            <p className="text-3xl font-black text-emerald-950 leading-loose text-right quran-font">
+                                                ${selectedAyahDetails.text}
+                                            </p>
+                                        </div>
+
+                                        ${selectedAyahDetails.loading ? html`
+                                            <div className="flex flex-col items-center justify-center py-10 gap-4">
+                                                <${Loader2} className="animate-spin text-emerald-900" size=${32} />
+                                                <p className="text-emerald-900 font-bold animate-pulse">جاري جلب القصص والأحاديث المرتبطة...</p>
+                                            </div>
+                                        ` : html`
+                                            <div className="prose prose-emerald max-w-none text-lg leading-relaxed text-slate-700 font-medium whitespace-pre-wrap"
+                                                 dangerouslySetInnerHTML=${{ __html: selectedAyahDetails.details.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\*(.*?)\*/g, '<i>$1</i>') }}>
+                                            </div>
+                                        `}
+
+                                        <div className="flex justify-between items-center pt-6 border-t border-emerald-50">
+                                            <button 
+                                                onClick=${() => {
+                                                    const idx = ayahs.findIndex(a => a.number === selectedAyahDetails.number);
+                                                    if (idx > 0) fetchAyahDetails(ayahs[idx - 1]);
+                                                }}
+                                                className="flex items-center gap-2 px-6 py-3 bg-emerald-50 text-emerald-900 rounded-2xl font-black hover:bg-emerald-900 hover:text-white transition-all"
+                                            >
+                                                <${ArrowRight} size=${18} /> الآية السابقة
+                                            </button>
+                                            <button 
+                                                onClick=${() => {
+                                                    const idx = ayahs.findIndex(a => a.number === selectedAyahDetails.number);
+                                                    if (idx < ayahs.length - 1) fetchAyahDetails(ayahs[idx + 1]);
+                                                }}
+                                                className="flex items-center gap-2 px-6 py-3 bg-emerald-50 text-emerald-900 rounded-2xl font-black hover:bg-emerald-900 hover:text-white transition-all"
+                                            >
+                                                الآية التالية <${ArrowLeft} size=${18} />
+                                            </button>
                                         </div>
                                     </div>
                                 </div>
